@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>FUGA REALISTA</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#83b9ef;font-family:Arial,sans-serif}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+#hud{position:fixed;top:14px;left:0;right:0;text-align:center;color:white;font-size:clamp(26px,6vw,44px);font-weight:900;text-shadow:0 3px 5px #555;pointer-events:none}
+#help{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);color:white;background:#1119;padding:9px 13px;border-radius:12px;font-size:12px;text-align:center;white-space:nowrap}
+#start{position:fixed;inset:0;display:grid;place-items:center;background:#0005;color:white;text-align:center}
+#start>div{background:#182536eF;padding:24px;border-radius:18px;width:min(86vw,360px);box-shadow:0 8px 30px #0005}
+#start h1{margin:0 0 8px;font-size:32px}#start p{line-height:1.4}
+button{border:0;border-radius:12px;background:#ffd43b;padding:13px 24px;font-size:18px;font-weight:900}
+.pad{position:fixed;bottom:70px;display:flex;gap:10px}
+#left{left:14px}#right{right:14px}
+.pad button{width:58px;height:58px;padding:0;background:#ffffffb9}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">0</div>
+<div id="help">A / D ou ← / → para mudar de faixa • W / ↑ para pular • S / ↓ para deslizar</div>
+<div class="pad" id="left"><button aria-label="esquerda">◀</button></div>
+<div class="pad" id="right"><button aria-label="direita">▶</button></div>
+<div id="start"><div><h1>FUGA REALISTA</h1><p>Corra pela pista de três faixas, desvie dos blocos e dos trens que vêm de frente. Não deixe o policial te alcançar!</p><button id="play">JOGAR</button></div></div>
+<script>
+const c=document.getElementById('game'),ctx=c.getContext('2d'),hud=document.getElementById('hud');
+let W,H, lane=1, jump=0, slide=0, score=0, speed=0.34, objects=[], running=false, last=0, spawn=0;
+function resize(){W=c.width=innerWidth*devicePixelRatio;H=c.height=innerHeight*devicePixelRatio;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);W=innerWidth;H=innerHeight}
+addEventListener('resize',resize);resize();
+function polygon(points,color){ctx.fillStyle=color;ctx.beginPath();ctx.moveTo(...points[0]);for(let p of points.slice(1))ctx.lineTo(...p);ctx.closePath();ctx.fill()}
+function line(x1,y1,x2,y2,color,w=2){ctx.strokeStyle=color;ctx.lineWidth=w;ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke()}
+function project(x,z){
+  // Câmera em terceira pessoa, atrás do personagem:
+  // z=0 fica no horizonte e z=1 fica perto da câmera.
+  const t=Math.max(0,Math.min(1,z));
+  const horizon=H*.43;
+  const roadTop=W*.28;
+  const roadBottom=W*.98;
+  const roadHalf=roadTop*(1-t)+roadBottom*t;
+  return {
+    x:W/2+x*roadHalf,
+    y:horizon+(H*.57)*t,
+    scale:.18+t*1.28
+  };
+}
+function roadPoint(lane,z){
+  const p=project((lane-1)*.34,z);
+  return p;
+}
+function drawScene(){
+  ctx.fillStyle='#83b9ef';ctx.fillRect(0,0,W,H);
+  // Sol e nuvens
+  ctx.fillStyle='#ffe98a';ctx.beginPath();ctx.arc(W*.12,H*.22,Math.min(W,H)*.075,0,Math.PI*2);ctx.fill();
+  for(let i=0;i<4;i++){ctx.fillStyle='#fff';ctx.beginPath();ctx.ellipse(W*(.18+i*.16),H*(.20+(i%2)*.025),W*.085,H*.025,0,0,Math.PI*2);ctx.fill()}
+  // Cidade dos dois lados
+  for(let side of [-1,1]){
+    for(let i=0;i<8;i++){
+      let depth=i/8, x=W/2+side*(W*(.27+depth*.34)), base=H*(.53-depth*.12);
+      let bw=W*(.055+depth*.035), bh=H*(.12+((i*37)%13)/100+depth*.12);
+      ctx.fillStyle=['#718394','#8998a7','#64798c'][i%3];
+      ctx.fillRect(x-bw/2,base-bh,bw,bh);
+      ctx.fillStyle='#f6df9b';
+      for(let yy=base-bh+10;yy<base-5;yy+=14)for(let xx=x-bw/2+6;xx<x+bw/2-4;xx+=12)ctx.fillRect(xx,yy,4,6);
+    }
+  }
+  // Estrada alinhada com a câmera do corredor central.
+  polygon([[W/2-W*.28,H*.43],[W/2+W*.28,H*.43],[W,H],[0,H]],'#737d89');
+
+  // Bordas da pista
+  line(W/2-W*.28,H*.43,0,H,'#e34b4b',5);
+  line(W/2+W*.28,H*.43,W,H,'#e34b4b',5);
+
+  // Divisões das 3 faixas: todas convergem para o mesmo ponto de fuga.
+  for(let laneLine of [-.34,.34]){
+    const a=project(laneLine,0);
+    const b=project(laneLine,.99);
+    line(a.x,a.y,b.x,b.y,'#f1f3f5',4);
+  }
+
+  // Marcas horizontais que dão velocidade e profundidade.
+  for(let z=.08;z<1;z+=.11){
+    const t=z;
+    const left=project(-1,t);
+    const right=project(1,t);
+    line(left.x,left.y,right.x,right.y,'#414b56',Math.max(1,4*(1-t)));
+  }
+  // Postes laterais
+  for(let z=.15;z<1;z+=.18){
+    let p=project(.82,z),q=project(-.82,z);
+    ctx.fillStyle='#303b46';ctx.fillRect(p.x-2,p.y-H*.13*(1-z),4,H*.13*(1-z));
+    ctx.fillRect(q.x-2,q.y-H*.13*(1-z),4,H*.13*(1-z));
+  }
+}
+function drawObject(o){
+  let p=roadPoint(o.lane,o.z),s=p.scale;
+  if(o.type==='coin'){
+    ctx.fillStyle='#ffd21f';ctx.beginPath();ctx.arc(p.x,p.y-12*s,9*s,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='#fff2a6';ctx.lineWidth=2*s;ctx.stroke();return;
+  }
+  let w=(o.type==='train'?92:72)*s,h=(o.type==='train'?112:58)*s,top=p.y-h;
+  if(o.type==='train'){
+    ctx.fillStyle='#293b4b';ctx.fillRect(p.x-w/2,top,w,h);
+    ctx.fillStyle='#e24a4a';ctx.fillRect(p.x-w/2,top+h*.12,w,h*.72);
+    ctx.fillStyle='#c9eaf4';ctx.fillRect(p.x-w*.34,top+h*.22,w*.68,h*.27);
+    ctx.strokeStyle='#293b4b';ctx.lineWidth=3*s;ctx.strokeRect(p.x-w*.34,top+h*.22,w*.68,h*.27);
+    ctx.fillStyle='#293b4b';ctx.fillRect(p.x-w*.055,top+h*.22,w*.11,h*.27);
+    ctx.fillStyle='#ffe27a';
+    ctx.beginPath();ctx.arc(p.x-w*.34,p.y-h*.12,5*s,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(p.x+w*.34,p.y-h*.12,5*s,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#d5dce2';ctx.fillRect(p.x-w*.46,p.y-h*.04,w*.92,h*.07);
+  }else{
+    ctx.fillStyle='#d0d5da';ctx.fillRect(p.x-w/2,top,w,h);
+    ctx.fillStyle='#46515d';ctx.fillRect(p.x-w/2,top,w,h*.22);
+    ctx.fillStyle='#e34b4b';ctx.fillRect(p.x-w*.42,top+h*.35,w*.12,h*.18);
+    ctx.fillRect(p.x+w*.30,top+h*.35,w*.12,h*.18);
+  }
+}
+function drawPlayer(){
+  // Personagem grande e fixo na parte inferior, como numa câmera de runner.
+  let x=roadPoint(lane,.99).x,y=H*.82-jump*82;
+  let bob=Math.sin(performance.now()/90)*2;
+  ctx.fillStyle='#0004';ctx.beginPath();ctx.ellipse(x,H*.82,25,8,0,0,Math.PI*2);ctx.fill();
+  // pernas e tênis
+  ctx.fillStyle='#20252b';
+  ctx.fillRect(x-14,y-22+bob,11,25);ctx.fillRect(x+3,y-22-bob,11,25);
+  ctx.fillStyle='#111820';ctx.fillRect(x-17,y-2+bob,15,7);ctx.fillRect(x+2,y-2-bob,15,7);
+  // corpo visto por trás, camiseta escura e faixa azul
+  ctx.fillStyle='#101820';ctx.fillRect(x-21,y-67,42,48);
+  ctx.fillStyle='#2455c7';ctx.fillRect(x-21,y-31,42,13);
+  // braços
+  ctx.strokeStyle='#8b5737';ctx.lineWidth=9;ctx.lineCap='round';
+  ctx.beginPath();ctx.moveTo(x-18,y-58);ctx.lineTo(x-27,y-39+bob);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x+18,y-58);ctx.lineTo(x+27,y-39-bob);ctx.stroke();
+  // cabeça e boné vistos por trás
+  ctx.fillStyle='#8b5737';ctx.beginPath();ctx.arc(x,y-82,17,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#080d13';ctx.beginPath();ctx.arc(x,y-88,18,Math.PI,Math.PI*2);ctx.fill();
+  ctx.fillRect(x-18,y-89,36,7);
+}
+function spawnObj(){let lane=Math.floor(Math.random()*3),r=Math.random();objects.push({lane,z:0,type:r<.28?'coin':r<.58?'barrier':'train'})}
+function endGame(){running=false;document.querySelector('#start').style.display='grid';document.querySelector('#start h1').textContent='FIM DE JOGO';document.querySelector('#start p').textContent='Sua pontuação: '+Math.floor(score)+' • Tente bater seu recorde!';document.querySelector('#play').textContent='JOGAR NOVAMENTE'}
+function frame(t){if(!running)return;let dt=Math.min((t-last)/1000,.04);last=t;score+=dt*12;speed=Math.min(.62,.34+score/1800);spawn+=dt;
+ if(spawn>1.25){spawn=0;spawnObj()}
+ jump=Math.max(0,jump-dt*2.5);slide=Math.max(0,slide-dt);
+ objects.forEach(o=>o.z+=dt*speed);
+ for(let o of objects){if(o.z>.84&&o.z<.97&&o.lane===lane){if(o.type==='coin'){score+=20;o.z=2}else if(!(o.type==='barrier'&&jump>.3)&&!(o.type==='train'&&slide>.2)){endGame();return}}}
+ objects=objects.filter(o=>o.z<1.12);
+ drawScene();objects.forEach(drawObject);drawPlayer();hud.textContent=Math.floor(score);
+ requestAnimationFrame(frame)}
+function start(){score=0;lane=1;jump=0;slide=0;objects=[];spawn=0;running=true;last=performance.now();document.querySelector('#start').style.display='none';requestAnimationFrame(frame)}
+document.querySelector('#play').onclick=start;
+function act(k){if(!running)return;if(k==='ArrowLeft'||k==='a')lane=Math.max(0,lane-1);if(k==='ArrowRight'||k==='d')lane=Math.min(2,lane+1);if(k==='ArrowUp'||k==='w')jump=.65;if(k==='ArrowDown'||k==='s')slide=.5}
+addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key))e.preventDefault();act(e.key)});
+document.querySelector('#left button').onpointerdown=()=>act('ArrowLeft');document.querySelector('#right button').onpointerdown=()=>act('ArrowRight');
+let sy=0;c.addEventListener('touchstart',e=>sy=e.touches[0].clientY,{passive:true});c.addEventListener('touchend',e=>{let dy=e.changedTouches[0].clientY-sy;if(Math.abs(dy)>25)act(dy<0?'ArrowUp':'ArrowDown');else act(e.changedTouches[0].clientX<W/2?'ArrowLeft':'ArrowRight')});
+</script>
+</body></html>
